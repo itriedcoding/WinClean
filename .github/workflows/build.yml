@@ -1,0 +1,100 @@
+name: Windows build & release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, build and publish
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, x64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run automated tests
+        run: cargo test --locked
+
+      - name: Build optimised release
+        run: cargo build --release --locked
+
+      - name: Read version from Cargo.toml
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw "Could not read the package version from Cargo.toml" }
+          $version = $match.Matches[0].Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "WinClean version: $version"
+
+      - name: Stage executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/winclean.exe dist/winclean.exe
+          $item = Get-Item dist/winclean.exe
+          Write-Host ("winclean.exe: {0:N0} bytes" -f $item.Length)
+          Get-FileHash dist/winclean.exe -Algorithm SHA256 |
+            ForEach-Object { "SHA256: $($_.Hash)" } |
+            Tee-Object -FilePath dist/SHA256.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winclean-windows-x64
+          path: |
+            dist/winclean.exe
+            dist/SHA256.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: WinClean v${{ steps.version.outputs.version }}
+          body: |
+            **WinClean v${{ steps.version.outputs.version }}** — Windows x64 release build.
+
+            ### Highlights
+            - Native Rust PC cleaner with Quick Clean, Deep Clean, Large Files and duplicate detection.
+            - Microsoft Defender quick, full and custom scans with verified remediation.
+            - Storage analyzer with low-space warnings, recommendations and guided cleanup.
+            - Startup manager, live system monitor, exclusions, logging and dark/light themes.
+            - Single self-contained executable — no installer or runtime required.
+
+            ### Install
+            1. Download `winclean.exe` below.
+            2. Run it. Administrator rights are requested only when a Windows-protected folder or
+               Defender action needs them.
+            3. Optionally enable **Start with Windows** or **Weekly maintenance** in Settings.
+
+            Built automatically from commit `${{ github.sha }}` on `windows-latest` with the
+            optimised release profile. Verify the download against `SHA256.txt`.
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for the safety
+            model and build instructions.
+          files: |
+            dist/winclean.exe
+            dist/SHA256.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
