@@ -676,13 +676,36 @@ impl WinCleanApp {
         state.selected.clear();
         state.summary = None;
 
-        if report.removed == 0 && report.failed > 0 {
+        if report.removed == 0 && report.failed == 0 && report.skipped > 0 {
+            let reason = report
+                .skipped_items
+                .first()
+                .map(|(_, reason)| reason.clone())
+                .unwrap_or_else(|| "WinClean kept them for safety".to_string());
+            self.toast(
+                ToastKind::Error,
+                format!(
+                    "Nothing was deleted — {} item(s) kept: {reason}",
+                    report.skipped
+                ),
+            );
+        } else if report.removed == 0 && report.failed > 0 {
             let detail = report
                 .errors
                 .first()
                 .map(|(path, error)| format!("{}: {error}", path.display()))
                 .unwrap_or_else(|| "The files could not be deleted".to_string());
-            self.toast(ToastKind::Error, detail);
+            let hint = if !self.elevated
+                && report
+                    .errors
+                    .iter()
+                    .any(|(_, error)| error.to_ascii_lowercase().contains("access denied"))
+            {
+                " — restart WinClean as administrator to clean Windows folders"
+            } else {
+                ""
+            };
+            self.toast(ToastKind::Error, format!("{detail}{hint}"));
         } else if report.failed > 0 {
             self.toast(
                 ToastKind::Info,

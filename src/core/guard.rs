@@ -279,13 +279,11 @@ impl<'a> DeletePolicy<'a> {
         if is_excluded(path, self.exclusions) {
             return Err(Refusal::Excluded);
         }
-        if is_personal(path) && !(self.allow_personal && category == Category::LargeFile) {
-            return Err(Refusal::PersonalData);
-        }
-        if category == Category::LargeFile && !self.allow_personal {
-            return Err(Refusal::PersonalData);
-        }
-        if category == Category::Duplicate && is_personal(path) && !self.allow_personal {
+        // Personal folders (Documents, Downloads, OneDrive, …) are never touched
+        // unless the user ticked the explicit approval box in the confirmation
+        // dialog. That approval applies to every category, including large files
+        // and duplicate copies; nothing personal is ever selected automatically.
+        if is_personal(path) && !self.allow_personal {
             return Err(Refusal::PersonalData);
         }
 
@@ -384,7 +382,7 @@ mod tests {
         let policy = DeletePolicy {
             allowed_roots: &roots,
             exclusions: &rules,
-            allow_personal: true,
+            allow_personal: false,
         };
         assert_eq!(
             policy.evaluate(Path::new(r"C:\Windows\Temp\a.tmp"), Category::WindowsTemp),
@@ -401,6 +399,31 @@ mod tests {
                 Category::WindowsTemp
             ),
             Err(Refusal::ProtectedSystemPath)
+        );
+    }
+
+    #[test]
+    fn approved_personal_duplicates_can_be_removed() {
+        let profile = paths::user_profile();
+        let file = profile.join("Downloads").join("copy.bin");
+        let roots = vec![profile.clone()];
+        let rules = prepare_exclusions(&[]);
+        let approved = DeletePolicy {
+            allowed_roots: &roots,
+            exclusions: &rules,
+            allow_personal: true,
+        };
+        assert_eq!(approved.evaluate(&file, Category::Duplicate), Ok(()));
+        assert_eq!(approved.evaluate(&file, Category::LargeFile), Ok(()));
+
+        let unapproved = DeletePolicy {
+            allowed_roots: &roots,
+            exclusions: &rules,
+            allow_personal: false,
+        };
+        assert_eq!(
+            unapproved.evaluate(&file, Category::Duplicate),
+            Err(Refusal::PersonalData)
         );
     }
 }

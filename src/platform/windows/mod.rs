@@ -232,9 +232,12 @@ pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return open_folder(path);
     }
+    // `explorer.exe` needs the literal `/select,"<path>"` command line. Passing
+    // the whole string as a single escaped argument makes Explorer open the wrong
+    // folder (or Documents), so hand it to the process unquoted via raw_arg.
     let argument = format!("/select,\"{}\"", path.display());
     Command::new("explorer.exe")
-        .arg(argument)
+        .raw_arg(argument)
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("Could not reveal {}: {err}", path.display()))

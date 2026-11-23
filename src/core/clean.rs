@@ -172,8 +172,14 @@ fn run_clean(
 }
 
 /// Deletes one file, clearing the read-only flag when necessary.
+///
+/// Windows frequently reports a sharing violation for a file that Defender, an
+/// indexer or the owning application is still touching, so a short retry loop is
+/// used instead of failing on the first attempt. Deep cache trees can also exceed
+/// `MAX_PATH`, which is handled through the extended-length path prefix.
 fn delete_file(path: &Path) -> io::Result<u64> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let target = extended_path(path);
+    let metadata = std::fs::symlink_metadata(&target)?;
     if metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -184,10 +190,46 @@ fn delete_file(path: &Path) -> io::Result<u64> {
     if metadata.permissions().readonly() {
         let mut permissions = metadata.permissions();
         permissions.set_readonly(false);
-        let _ = std::fs::set_permissions(path, permissions);
+        let _ = std::fs::set_permissions(&target, permissions);
     }
-    std::fs::remove_file(path)?;
-    Ok(size)
+
+    let mut last_error = None;
+    for attempt in 0..4 {
+        match std::fs::remove_file(&target) {
+            Ok(()) => return Ok(size),
+            Err(error) => {
+                let retryable = !matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+                );
+                last_error = Some(error);
+                if !retryable || attempt == 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(45));
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "the file could not be removed")))
+}
+
+/// Adds the `\\?\` prefix for paths longer than the classic Windows limit.
+#[cfg(windows)]
+fn extended_path(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if text.len() < 248 || text.starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    if let Some(unc) = text.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{unc}"));
+    }
+    PathBuf::from(format!(r"\\?\{text}"))
+}
+
+#[cfg(not(windows))]
+fn extended_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 /// Removes empty parent folders, stopping at the first non-empty or protected folder.

@@ -76,6 +76,7 @@ enum CleanerAction {
     Refresh,
     Clean(Vec<Finding>, bool),
     Reveal(PathBuf),
+    Elevate,
     Navigate(Page),
 }
 
@@ -416,12 +417,39 @@ pub fn show(ui: &mut Ui, app: &mut WinCleanApp, mode: CleanerMode) {
         if let Some(report) = &state.last_report {
             report_panel(ui, &palette, report);
             ui.add_space(14.0);
+            if !elevated {
+                let denied = report
+                    .errors
+                    .iter()
+                    .filter(|(_, error)| {
+                        let lower = error.to_ascii_lowercase();
+                        lower.contains("access denied") || lower.contains("administrator")
+                    })
+                    .count();
+                if denied > 0 {
+                    widgets::alert_banner(
+                        ui,
+                        &palette,
+                        palette.warning,
+                        Icon::Shield,
+                        "Administrator rights needed",
+                        &format!(
+                            "{denied} item(s) are owned by Windows and were kept. Restart elevated to clean Windows Temp, update downloads and Windows logs."
+                        ),
+                    );
+                    ui.add_space(6.0);
+                    if widgets::primary_button(ui, &palette, "Restart as administrator").clicked() {
+                        action = Some(CleanerAction::Elevate);
+                    }
+                    ui.add_space(14.0);
+                }
+            }
         }
 
         summary_row(ui, &palette, state, mode, large_threshold);
         ui.add_space(14.0);
 
-        results(ui, &palette, state, mode, &mut action);
+        results(ui, &palette, state, mode, elevated, &mut action);
         ui.add_space(12.0);
     }
 
@@ -465,6 +493,7 @@ pub fn show(ui: &mut Ui, app: &mut WinCleanApp, mode: CleanerMode) {
                 app.toast(ToastKind::Error, err);
             }
         }
+        Some(CleanerAction::Elevate) => app.request_elevation(),
         Some(CleanerAction::Navigate(page)) => app.navigate(page),
         None => {}
     }
@@ -715,15 +744,32 @@ fn report_panel(ui: &mut Ui, palette: &Palette, report: &CleanReport) {
             }
         }
         if !report.skipped_items.is_empty() {
+            ui.add_space(4.0);
             ui.label(
                 RichText::new(format!(
-                    "{} item(s) kept for safety: {}",
-                    report.skipped_items.len(),
-                    report.skipped_items[0].1
+                    "{} item(s) kept for safety:",
+                    report.skipped_items.len()
                 ))
                 .size(11.0)
                 .color(palette.muted),
             );
+            for (path, reason) in report.skipped_items.iter().take(3) {
+                ui.label(
+                    RichText::new(format!(
+                        "{} — {reason}",
+                        crate::format::ellipsize(&path.to_string_lossy(), 72)
+                    ))
+                    .size(10.5)
+                    .color(palette.muted),
+                );
+            }
+            if report.skipped_items.len() > 3 {
+                ui.label(
+                    RichText::new(format!("… and {} more", report.skipped_items.len() - 3))
+                        .size(10.5)
+                        .color(palette.muted),
+                );
+            }
         }
     });
 }
@@ -821,6 +867,7 @@ fn results(
     palette: &Palette,
     state: &mut CleanerState,
     mode: CleanerMode,
+    elevated: bool,
     action: &mut Option<CleanerAction>,
 ) {
     widgets::card(palette).show(ui, |ui| {
@@ -974,7 +1021,7 @@ fn results(
         });
     });
 
-    confirm_dialog(ui.ctx(), palette, state, action);
+    confirm_dialog(ui.ctx(), palette, state, elevated, action);
 }
 
 fn category_chips(ui: &mut Ui, palette: &Palette, state: &mut CleanerState) {
@@ -1252,12 +1299,18 @@ fn confirm_dialog(
     ctx: &egui::Context,
     palette: &Palette,
     state: &mut CleanerState,
+    elevated: bool,
     action: &mut Option<CleanerAction>,
 ) {
     if !state.confirm_open {
         return;
     }
     let items: Vec<Finding> = state.selected_findings();
+    let admin_items = if elevated {
+        0
+    } else {
+        items.iter().filter(|item| needs_admin(&item.path)).count()
+    };
     let personal: Vec<&Finding> = items
         .iter()
         .filter(|finding| guard::is_personal(&finding.path))
@@ -1301,6 +1354,23 @@ fn confirm_dialog(
                 );
             }
             ui.add_space(8.0);
+
+            if admin_items > 0 {
+                widgets::alert_banner(
+                    ui,
+                    palette,
+                    palette.warning,
+                    Icon::Shield,
+                    &format!("{admin_items} item(s) need administrator rights"),
+                    "Windows protects its own Temp, Update and log folders. Those items are kept unless WinClean runs elevated.",
+                );
+                ui.add_space(6.0);
+                if widgets::ghost_button(ui, palette, "Restart as administrator").clicked() {
+                    *action = Some(CleanerAction::Elevate);
+                    close = true;
+                }
+                ui.add_space(6.0);
+            }
 
             if has_personal {
                 widgets::alert_banner(
@@ -1364,6 +1434,15 @@ fn confirm_dialog(
         state.confirm_open = false;
         state.confirm_understood = false;
     }
+}
+
+/// True when a path lives under a Windows-owned location that needs elevation.
+fn needs_admin(path: &std::path::Path) -> bool {
+    let normalized = crate::core::guard::normalize(path);
+    let windows = crate::core::guard::normalize(&crate::core::paths::windows_dir());
+    let program_data = crate::core::guard::normalize(&crate::core::paths::program_data());
+    crate::core::guard::is_within(&normalized, &windows)
+        || crate::core::guard::is_within(&normalized, &program_data)
 }
 
 /// Root folders accepted for cleanup deletions.

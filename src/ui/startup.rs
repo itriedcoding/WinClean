@@ -38,6 +38,22 @@ enum StartupAction {
     OpenTaskScheduler,
 }
 
+/// Extracts the executable from a Run key command so Explorer can select it.
+fn command_executable(command: &str) -> PathBuf {
+    let expanded = crate::core::paths::expand_env(command.trim());
+    let trimmed = expanded.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        if let Some(end) = rest.find('"') {
+            return PathBuf::from(&rest[..end]);
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(position) = lower.find(".exe") {
+        return PathBuf::from(trimmed[..position + 4].trim());
+    }
+    PathBuf::from(trimmed.split_whitespace().next().unwrap_or(trimmed))
+}
+
 pub fn show(ui: &mut Ui, app: &mut WinCleanApp) {
     let palette = app.palette;
     let elevated = app.elevated;
@@ -263,7 +279,7 @@ pub fn show(ui: &mut Ui, app: &mut WinCleanApp) {
                 });
             });
             if reveal {
-                action = Some(StartupAction::Reveal(PathBuf::from(&entry.command)));
+                action = Some(StartupAction::Reveal(command_executable(&entry.command)));
             }
             widgets::thin_separator(ui, &palette);
         }
