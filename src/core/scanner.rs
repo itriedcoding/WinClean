@@ -1142,13 +1142,21 @@ mod tests {
     fn duplicate_scan_groups_identical_files() {
         let root = scratch_dir("dupes");
         let content = vec![42u8; 100_000];
-        let mut a = fs::File::create(root.join("one.bin")).unwrap();
-        a.write_all(&content).unwrap();
-        let mut b = fs::File::create(root.join("two.bin")).unwrap();
-        b.write_all(&content).unwrap();
+        {
+            let mut a = fs::File::create(root.join("one.bin")).unwrap();
+            a.write_all(&content).unwrap();
+            a.sync_all().unwrap();
+        }
+        {
+            let mut b = fs::File::create(root.join("two.bin")).unwrap();
+            b.write_all(&content).unwrap();
+            b.sync_all().unwrap();
+        }
         fs::write(root.join("three.bin"), vec![9u8; 100_000]).unwrap();
+        // Give antivirus/real-time filters a moment to release the freshly written
+        // files before hashing them, as they would on a real machine.
+        std::thread::sleep(std::time::Duration::from_millis(250));
 
-        let settings = Settings::default();
         let spec = ScanSpec {
             roots: Vec::new(),
             duplicate_roots: vec![root.clone()],
@@ -1158,14 +1166,17 @@ mod tests {
             recycle_bin: None,
             threads: 2,
         };
-        let _ = settings;
         let (findings, _) = collect(spawn_scan(spec));
         let dupes: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.category == Category::Duplicate)
             .collect();
         // Only the redundant copy is reported; the keeper is never pre-selected.
-        assert_eq!(dupes.len(), 1, "exactly one redundant copy is reported");
+        assert_eq!(
+            dupes.len(),
+            1,
+            "exactly one redundant copy should be reported, got: {dupes:#?}"
+        );
         assert!(
             dupes[0].note.starts_with("Identical to "),
             "{}",

@@ -12,6 +12,26 @@ use std::sync::{Arc, Mutex};
 
 const PARTIAL_BYTES: u64 = 32 * 1024;
 
+/// Opens a candidate for reading even while another process briefly holds it.
+/// Windows can return a sharing violation while Defender inspects a just-written
+/// file, so a few short retries keep a legitimate duplicate from being dropped.
+fn open_shared(path: &Path) -> Option<std::fs::File> {
+    for attempt in 0..4 {
+        match std::fs::File::open(path) {
+            Ok(file) => return Some(file),
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return None;
+                }
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Finds duplicate files below `roots` and reports every redundant copy.
 pub fn scan_duplicates(
     roots: &[PathBuf],
@@ -112,13 +132,16 @@ pub fn scan_duplicates(
                 }
             }
             for (_, mut copies) in exact.into_iter().filter(|(_, paths)| paths.len() > 1) {
+                // Oldest copy wins; the path breaks ties when a filesystem reports
+                // the same timestamp for files created in the same tick.
                 copies.sort_by_key(|path| {
-                    std::fs::metadata(path)
+                    let stamp = std::fs::metadata(path)
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs())
-                        .unwrap_or(u64::MAX)
+                        .unwrap_or(u64::MAX);
+                    (stamp, path.to_string_lossy().to_ascii_lowercase())
                 });
                 let keeper = copies[0].clone();
                 let keeper_name = keeper
@@ -144,7 +167,7 @@ pub fn scan_duplicates(
 
 /// Hashes a file in 64 KiB chunks, optionally stopping after `limit` bytes.
 fn hash_file(path: &Path, limit: Option<u64>, cancel: &AtomicBool) -> Option<[u8; 32]> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = open_shared(path)?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 64 * 1024];

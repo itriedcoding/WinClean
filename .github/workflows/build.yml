@@ -38,7 +38,7 @@ jobs:
           cargo test --locked --no-fail-fast 2>&1 | Tee-Object -FilePath test-output.txt
           if ($LASTEXITCODE -ne 0) {
             Get-Content test-output.txt |
-              Where-Object { $_ -match 'FAILED|panicked at|assertion|error\[E' } |
+              Where-Object { $_ -match 'FAILED|panicked at|assertion|error\[E|left:|right:' } |
               Select-Object -First 40 |
               ForEach-Object { Write-Host "::error::$($_.Trim())" }
             exit 1
